@@ -19,11 +19,17 @@ package org.apache.spark.sql.execution.benchmark
 
 import java.util.Locale
 
-
 class TPCDSQueryBenchmarkArguments(val args: Array[String]) {
+  var queryLocation: String = null
+  var database: String = null
   var dataLocation: String = null
   var queryFilter: Set[String] = Set.empty
   var cboEnabled: Boolean = false
+  var collectStats: Boolean = false
+  var fileFormat: String = "orc"
+  var mode: String = "explain" // explain or execute
+  var recoverPartition: Boolean = false
+  var histogram: Boolean = false
 
   parseArgs(args.toList)
   validateArguments()
@@ -37,8 +43,20 @@ class TPCDSQueryBenchmarkArguments(val args: Array[String]) {
 
     while (args.nonEmpty) {
       args match {
+        case optName :: value :: tail if optionMatch("--database", optName) =>
+          database = value
+          args = tail
+
+        case optName :: value :: tail if optionMatch("--query-location", optName) =>
+          queryLocation = value
+          args = tail
+
         case optName :: value :: tail if optionMatch("--data-location", optName) =>
           dataLocation = value
+          args = tail
+
+        case optName :: value :: tail if optionMatch("--file-format", optName) =>
+          fileFormat = value
           args = tail
 
         case optName :: value :: tail if optionMatch("--query-filter", optName) =>
@@ -47,6 +65,22 @@ class TPCDSQueryBenchmarkArguments(val args: Array[String]) {
 
         case optName :: tail if optionMatch("--cbo", optName) =>
           cboEnabled = true
+          args = tail
+
+        case optName :: tail if optionMatch("--collect-stats", optName) =>
+          collectStats = true
+          args = tail
+
+        case optName :: value :: tail if optionMatch("--mode", optName) =>
+          mode = value
+          args = tail
+
+        case optName :: tail if optionMatch("--recover-partition", optName) =>
+          recoverPartition = true
+          args = tail
+
+        case optName :: tail if optionMatch("--histogram", optName) =>
+          histogram = true
           args = tail
 
         case _ =>
@@ -63,9 +97,15 @@ class TPCDSQueryBenchmarkArguments(val args: Array[String]) {
     System.err.println("""
       |Usage: spark-submit --class <this class> <spark sql test jar> [Options]
       |Options:
+      |  --database           Database name
+      |  --data-location      Path to TPCDS queries
       |  --data-location      Path to TPCDS data
+      |  --file-format        File format, e.g. parquet,orc
       |  --query-filter       Queries to filter, e.g., q3,q5,q13
       |  --cbo                Whether to enable cost-based optimization
+      |  --collect-stats      Whether to collect table statistics
+      |  --recover-partition  Whether to enable recover-partition
+      |  --histogram          Whether to enable histogram
       |
       |------------------------------------------------------------------------------------------------------------------
       |In order to run this benchmark, please follow the instructions at
@@ -84,5 +124,29 @@ class TPCDSQueryBenchmarkArguments(val args: Array[String]) {
       // scalastyle:on println
       printUsageAndExit(-1)
     }
+    if (fileFormat == null) {
+      // scalastyle:off println
+      System.err.println("Must specify file format")
+      // scalastyle:on println
+      printUsageAndExit(-1)
+    }
+    if (mode == null || !Seq("explain", "execute").contains(mode)) {
+      // scalastyle:off println
+      System.err.println("Must specify mode to explain or execute")
+      // scalastyle:on println
+      printUsageAndExit(-1)
+    }
   }
+
+  override def toString: String =
+    s"\ndatabase=$database, " +
+    s"\nqueryLocation=$queryLocation, " +
+    s"\ndataLocation=$dataLocation, " +
+    s"\nqueryFilter=$queryFilter, " +
+    s"\ncboEnabled=$cboEnabled," +
+    s"\ncollectStats=$collectStats, " +
+    s"\nfileFormat=$fileFormat" +
+    s"\nrecoverPartition=$recoverPartition" +
+    s"\nmode=$mode" +
+    s"\nhistogram=$histogram"
 }

@@ -17,6 +17,9 @@
 
 package org.apache.spark.sql.execution.benchmark
 
+import java.io.File
+import java.nio.file.Files
+
 import scala.util.Try
 
 import org.apache.spark.SparkConf
@@ -47,16 +50,17 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
 
   override def getSparkSession: SparkSession = {
     val conf = new SparkConf()
-      .setMaster(System.getProperty("spark.sql.test.master", "local[1]"))
+//      .setMaster(System.getProperty("spark.sql.test.master", "local[1]"))
+      .setMaster("yarn")
       .setAppName("test-sql-context")
       .set("spark.sql.parquet.compression.codec", "snappy")
-      .set("spark.sql.shuffle.partitions", System.getProperty("spark.sql.shuffle.partitions", "4"))
-      .set("spark.driver.memory", "3g")
-      .set("spark.executor.memory", "3g")
+      .set("spark.driver.memory", "4g")
+      .set("spark.executor.memory", "8g")
       .set("spark.sql.autoBroadcastJoinThreshold", (20 * 1024 * 1024).toString)
       .set("spark.sql.crossJoin.enabled", "true")
+      .set("spark.yarn.am.waitTime", "600000")
 
-    SparkSession.builder.config(conf).getOrCreate()
+    SparkSession.builder.enableHiveSupport().config(conf).getOrCreate()
   }
 
   val tables = Seq("catalog_page", "catalog_returns", "customer", "customer_address",
@@ -65,22 +69,49 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
     "web_returns", "web_site", "reason", "call_center", "warehouse", "ship_mode", "income_band",
     "time_dim", "web_page")
 
-  def setupTables(dataLocation: String, createTempView: Boolean): Map[String, Long] = {
+  def setupTables(
+      dataLocation: String,
+      fileFormat: String,
+      database: String,
+      createTempView: Boolean,
+      recoverPartition: Boolean): Map[String, Long] = {
+    val useDatabase = database != null && database.nonEmpty
+    if (useDatabase) spark.sql(s"USE $database")
+
     tables.map { tableName =>
-      if (createTempView) {
-        spark.read.parquet(s"$dataLocation/$tableName").createOrReplaceTempView(tableName)
-      } else {
-        spark.sql(s"DROP TABLE IF EXISTS $tableName")
-        spark.catalog.createTable(tableName, s"$dataLocation/$tableName", "parquet")
-        // Recover partitions but don't fail if a table is not partitioned.
-        Try {
-          spark.sql(s"ALTER TABLE $tableName RECOVER PARTITIONS")
-        }.getOrElse {
-          logInfo(s"Recovering partitions of table $tableName failed")
+      if (!useDatabase) {
+        if (createTempView) {
+          fileFormat match {
+            case "parquet" =>
+              spark.read.parquet(s"$dataLocation/$tableName").createOrReplaceTempView(tableName)
+            case "orc" =>
+              spark.read.orc(s"$dataLocation/$tableName").createOrReplaceTempView(tableName)
+            case _ =>
+              spark.read.text(s"$dataLocation/$tableName").createOrReplaceTempView(tableName)
+          }
+        } else {
+          spark.sql(s"DROP TABLE IF EXISTS $tableName")
+          spark.catalog.createTable(tableName, s"$dataLocation/$tableName", fileFormat)
+          if (recoverPartition) {
+            // Recover partitions but don't fail if a table is not partitioned.
+            Try {
+              spark.sql(s"ALTER TABLE $tableName RECOVER PARTITIONS")
+            }.getOrElse {
+              logInfo(s"Recovering partitions of table $tableName failed")
+            }
+          }
         }
       }
       tableName -> spark.table(tableName).count()
     }.toMap
+  }
+
+  def explainTpcdsQueries(queryLocation: String, queries: Seq[String]): Unit = {
+    queries.foreach { name =>
+      val queryString = readQuery(queryLocation, name)
+      print(s"explain query: $name")
+      spark.sql(queryString).explain(true)
+    }
   }
 
   def runTpcdsQueries(
@@ -89,8 +120,7 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
       tableSizes: Map[String, Long],
       nameSuffix: String = ""): Unit = {
     queries.foreach { name =>
-      val queryString = resourceToString(s"$queryLocation/$name.sql",
-        classLoader = Thread.currentThread().getContextClassLoader)
+      val queryString = readQuery(queryLocation, name)
 
       // This is an indirect hack to estimate the size of each query's input by traversing the
       // logical plan and adding up the sizes of all tables that appear in the plan.
@@ -130,6 +160,7 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
 
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
     val benchmarkArgs = new TPCDSQueryBenchmarkArguments(mainArgs)
+    logInfo(s"args: " + benchmarkArgs)
 
     // List of all TPC-DS v1.4 queries
     val tpcdsQueries = Seq(
@@ -153,36 +184,71 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
       "q80a", "q86a", "q98")
 
     // If `--query-filter` defined, filters the queries that this option selects
-    val queriesV1_4ToRun = filterQueries(tpcdsQueries, benchmarkArgs.queryFilter)
-    val queriesV2_7ToRun = filterQueries(tpcdsQueriesV2_7, benchmarkArgs.queryFilter,
-      nameSuffix = nameSuffixForQueriesV2_7)
+//    val queriesV1_4ToRun = filterQueries(tpcdsQueries, benchmarkArgs.queryFilter)
+//    val queriesV2_7ToRun = filterQueries(tpcdsQueriesV2_7, benchmarkArgs.queryFilter,
+//      nameSuffix = nameSuffixForQueriesV2_7)
+//
+//    if ((queriesV1_4ToRun ++ queriesV2_7ToRun).isEmpty) {
+//      throw new RuntimeException(
+//        s"Empty queries to run. Bad query name filter: ${benchmarkArgs.queryFilter}")
+//    }
+    val queries = filterQueries(tpcdsQueries, benchmarkArgs.queryFilter)
 
-    if ((queriesV1_4ToRun ++ queriesV2_7ToRun).isEmpty) {
-      throw new RuntimeException(
-        s"Empty queries to run. Bad query name filter: ${benchmarkArgs.queryFilter}")
-    }
-
-    val tableSizes = setupTables(benchmarkArgs.dataLocation,
-      createTempView = !benchmarkArgs.cboEnabled)
+    val tableSizes = setupTables(
+      benchmarkArgs.dataLocation,
+      benchmarkArgs.fileFormat,
+      benchmarkArgs.database,
+      createTempView = !benchmarkArgs.cboEnabled,
+      benchmarkArgs.recoverPartition)
     if (benchmarkArgs.cboEnabled) {
       spark.sql(s"SET ${SQLConf.CBO_ENABLED.key}=true")
       spark.sql(s"SET ${SQLConf.PLAN_STATS_ENABLED.key}=true")
       spark.sql(s"SET ${SQLConf.JOIN_REORDER_ENABLED.key}=true")
-      spark.sql(s"SET ${SQLConf.HISTOGRAM_ENABLED.key}=true")
-
-      // Analyze all the tables before running TPCDS queries
-      val startTime = System.nanoTime()
-      tables.foreach { tableName =>
-        spark.sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS FOR ALL COLUMNS")
+      if (benchmarkArgs.histogram) {
+        spark.sql(s"SET ${SQLConf.HISTOGRAM_ENABLED.key}=true")
+      } else {
+        spark.sql(s"SET ${SQLConf.HISTOGRAM_ENABLED.key}=false")
       }
-      logInfo("The elapsed time to analyze all the tables is " +
-        s"${(System.nanoTime() - startTime) / NANOS_PER_SECOND.toDouble} seconds")
     } else {
       spark.sql(s"SET ${SQLConf.CBO_ENABLED.key}=false")
     }
 
-    runTpcdsQueries(queryLocation = "tpcds", queries = queriesV1_4ToRun, tableSizes)
-    runTpcdsQueries(queryLocation = "tpcds-v2.7.0", queries = queriesV2_7ToRun, tableSizes,
-      nameSuffix = nameSuffixForQueriesV2_7)
+    if (benchmarkArgs.collectStats) {
+      // Analyze all the tables before running TPCDS queries
+      val startTime = System.nanoTime()
+      tables.foreach { tableName =>
+        print(s"ANALYZE TABLE $tableName")
+        spark.sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS FOR ALL COLUMNS")
+      }
+      logInfo("The elapsed time to analyze all the tables is " +
+        s"${(System.nanoTime() - startTime) / NANOS_PER_SECOND.toDouble} seconds")
+    }
+
+    val queryLocation = if (benchmarkArgs.queryLocation != null &&
+      benchmarkArgs.queryLocation.nonEmpty) {
+      benchmarkArgs.queryLocation
+    } else {
+      "tpcds"
+    }
+
+    benchmarkArgs.mode match {
+      case "explain" =>
+        explainTpcdsQueries(queryLocation, queries)
+      case "execute" =>
+        runTpcdsQueries(queryLocation, queries, tableSizes)
+      case m =>
+        throw new RuntimeException(s"Illegal mode: $m")
+    }
+  }
+
+  private def readQuery(queryLocation: String, name: String): String = {
+    val query = s"$queryLocation/$name.sql"
+    print(s"read query: $query")
+    val file = new File(query)
+    if (file.exists()) {
+      new String(Files.readAllBytes(file.toPath))
+    } else {
+      resourceToString(query, classLoader = Thread.currentThread().getContextClassLoader)
+    }
   }
 }
