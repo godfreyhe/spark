@@ -109,7 +109,7 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
   def explainTpcdsQueries(queryLocation: String, queries: Seq[String]): Unit = {
     queries.foreach { name =>
       val queryString = readQuery(queryLocation, name)
-      print(s"explain query: $name")
+      print(s"explain query: $name\n")
       spark.sql(queryString).explain(true)
     }
   }
@@ -243,7 +243,7 @@ object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
 
   private def readQuery(queryLocation: String, name: String): String = {
     val query = s"$queryLocation/$name.sql"
-    print(s"read query: $query")
+    print(s"read query: $query\n")
     val file = new File(query)
     if (file.exists()) {
       new String(Files.readAllBytes(file.toPath))
