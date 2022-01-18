@@ -49,18 +49,7 @@ import org.apache.spark.sql.internal.SQLConf
 object TPCDSQueryBenchmark extends SqlBasedBenchmark with Logging {
 
   override def getSparkSession: SparkSession = {
-    val conf = new SparkConf()
-//      .setMaster(System.getProperty("spark.sql.test.master", "local[1]"))
-      .setMaster("yarn")
-      .setAppName("test-sql-context")
-      .set("spark.sql.parquet.compression.codec", "snappy")
-      .set("spark.driver.memory", "4g")
-      .set("spark.executor.memory", "8g")
-      .set("spark.sql.autoBroadcastJoinThreshold", (20 * 1024 * 1024).toString)
-      .set("spark.sql.crossJoin.enabled", "true")
-      .set("spark.yarn.am.waitTime", "600000")
-
-    SparkSession.builder.enableHiveSupport().config(conf).getOrCreate()
+    SparkSession.builder.enableHiveSupport().config(new SparkConf()).getOrCreate()
   }
 
   val tables = Seq("catalog_page", "catalog_returns", "customer", "customer_address",
